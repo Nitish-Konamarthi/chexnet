@@ -3,7 +3,7 @@ import numpy as np
 import time
 import sys
 
-from ChexnetTrainer import ChexnetTrainer
+from .ChexnetTrainer import ChexnetTrainer
 
 #-------------------------------------------------------------------------------- 
 
