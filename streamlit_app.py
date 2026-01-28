@@ -26,7 +26,7 @@ except Exception as e:
 st.set_page_config(page_title="CheXNet Prototype", layout="wide")
 
 MODEL_PATH_ENV = os.environ.get("MODEL_PATH", "chexnet/models/m-25012018-123527.pth.tar")
-st.title("🩺 CheXNet — AI Chest X-ray Analysis")
+st.title("🩺 Chest X-ray Analysis")
 
 st.markdown(
     """
@@ -152,7 +152,7 @@ def generate_gradcam_visualization(image_rgb: Image.Image, model, inp, device, b
     return generate_gradcam(model, inp, device, image_rgb, blend_alpha)
 
 # Run prediction button
-if st.button("🚀 Run Pathology Analysis", key="run_pred", use_container_width=True):
+if st.button(" Run Pathology Analysis", key="run_pred", use_container_width=True):
     try:
         # Get predictions
         results, inp = predict_pil(image, model, device)
