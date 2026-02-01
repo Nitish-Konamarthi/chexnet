@@ -17,7 +17,8 @@ except Exception as e:
 
 app = FastAPI(title="CheXNet Prototype Inference")
 
-MODEL_PATH = os.environ.get("MODEL_PATH", "chexnet/models/m-25012018-123527.pth.tar")
+#MODEL_PATH = os.environ.get("MODEL_PATH", "chexnet/models/m-25012018-123527.pth.tar")
+MODEL_PATH = os.environ.get("MODEL_PATH", "chexnet/models/m-30012020-104001.pth.tar")
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 def load_state(path):

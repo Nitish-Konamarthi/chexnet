@@ -69,8 +69,8 @@ def runTest():
     imgtransResize = 256
     imgtransCrop = 224
     
-    pathModel = './models/m-25012018-123527.pth.tar'
-    
+    #pathModel = './chexnet/models/m-25012018-123527.pth.tar'
+    pathModel = './chexnet/models/m-30012020-104001.pth.tar'
     timestampLaunch = ''
     
     ChexnetTrainer.test(pathDirData, pathFileTest, pathModel, nnArchitecture, nnClassCount, nnIsTrained, trBatchSize, imgtransResize, imgtransCrop, timestampLaunch)

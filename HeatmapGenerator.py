@@ -14,12 +14,15 @@ except ImportError:
     from DensenetModels import DenseNet121, DenseNet169, DenseNet201
 
 #------------------------------------------------------------------------------------
-# Grad-CAM Utilities for Model Interpretability
+# Grad-CAM++ Utilities for Model Interpretability
 #------------------------------------------------------------------------------------
 
 def generate_gradcam(model, inp, device, image_rgb=None, blend_alpha=0.5):
     """
-    Generate Grad-CAM (Gradient-weighted Class Activation Map) visualization.
+    Generate Grad-CAM++ (Gradient-weighted Class Activation Map) visualization.
+    
+    Grad-CAM++ improves upon Grad-CAM by using pixel-wise weighting of gradients,
+    providing better localization especially for multiple instances of objects.
     
     This is a reusable function for both web apps and batch processing.
     Uses gradient information to show which regions contributed most to predictions.
@@ -32,12 +35,12 @@ def generate_gradcam(model, inp, device, image_rgb=None, blend_alpha=0.5):
         blend_alpha: Blend intensity (0.0=all X-ray, 1.0=all heatmap, default=0.5)
     
     Returns:
-        numpy array: Grad-CAM heatmap (224, 224, 3) in RGB format, or None if failed
+        numpy array: Grad-CAM++ heatmap (224, 224, 3) in RGB format, or None if failed
         
     Example:
         >>> from HeatmapGenerator import generate_gradcam
         >>> heatmap = generate_gradcam(model, inp, device, image_rgb, blend_alpha=0.6)
-        >>> st.image(heatmap, caption="Grad-CAM Attention Map")
+        >>> st.image(heatmap, caption="Grad-CAM++ Attention Map")
     """
     try:
         # Step 1: Forward pass to identify top prediction
@@ -46,42 +49,94 @@ def generate_gradcam(model, inp, device, image_rgb=None, blend_alpha=0.5):
             probs = torch.sigmoid(output).squeeze(0).cpu().numpy()
             top_class = np.argmax(probs)
         
-        # Step 2: Enable gradients for input
+        # Step 2: Register hooks to capture feature maps and gradients
+        activations = None
+        gradients = None
+        
+        def forward_hook(module, input, output):
+            nonlocal activations
+            activations = output.detach()
+        
+        def backward_hook(module, grad_input, grad_output):
+            nonlocal gradients
+            gradients = grad_output[0].detach()
+        
+        # Find the last convolutional layer (features for DenseNet)
+        target_layer = None
+        if hasattr(model, 'features'):
+            target_layer = model.features
+        elif hasattr(model, 'densenet121') and hasattr(model.densenet121, 'features'):
+            target_layer = model.densenet121.features
+        
+        if target_layer is None:
+            raise RuntimeError("Could not find features layer in model")
+        
+        # Register hooks
+        handle_forward = target_layer.register_forward_hook(forward_hook)
+        handle_backward = target_layer.register_backward_hook(backward_hook)
+        
+        # Step 3: Forward pass with gradient computation
         inp_grad = inp.clone().detach().to(device)
         inp_grad.requires_grad_(True)
         
         output_grad = model(inp_grad)
         score = output_grad[0, top_class]
         
-        # Step 3: Backward pass to compute gradients
+        # Step 4: Backward pass to compute gradients
         model.zero_grad()
         score.backward()
         
-        # Step 4: Extract and process gradients
-        grads = inp_grad.grad.data  # Shape: (1, 3, 224, 224)
+        # Remove hooks
+        handle_forward.remove()
+        handle_backward.remove()
         
-        # Compute absolute value and mean across channels
-        gradcam = torch.abs(grads).mean(dim=1).squeeze(0)  # Shape: (224, 224)
+        # Step 5: Compute Grad-CAM++ weights
+        if gradients is None or activations is None:
+            raise RuntimeError("Failed to capture gradients or activations")
         
-        # Convert to numpy
-        gradcam_np = gradcam.detach().cpu().numpy().astype(np.float64)
+        # Get dimensions
+        b, k, u, v = gradients.size()
         
-        # Normalize to 0-1 range
-        gradcam_min = np.min(gradcam_np)
-        gradcam_max = np.max(gradcam_np)
-        if gradcam_max > gradcam_min:
-            gradcam_normalized = (gradcam_np - gradcam_min) / (gradcam_max - gradcam_min)
-        else:
-            gradcam_normalized = np.zeros_like(gradcam_np)
+        # Calculate alpha weights using 2nd and 3rd order gradients
+        # alpha = grad^2 / (2 * grad^2 + sum(activation * grad^3))
+        alpha_num = gradients.pow(2)
+        alpha_denom = gradients.pow(2).mul(2) + \
+                      activations.mul(gradients.pow(3)).view(b, k, u*v).sum(-1, keepdim=True).view(b, k, 1, 1)
+        
+        # Avoid division by zero
+        alpha_denom = torch.where(alpha_denom != 0.0, alpha_denom, torch.ones_like(alpha_denom))
+        
+        # Compute alpha
+        alpha = alpha_num.div(alpha_denom + 1e-7)
+        
+        # Apply ReLU to gradients (only positive influences)
+        positive_gradients = torch.nn.functional.relu(gradients)
+        
+        # Calculate importance weights
+        weights = (alpha * positive_gradients).view(b, k, u*v).sum(-1).view(b, k, 1, 1)
+        
+        # Generate weighted activation map
+        gradcam = (weights * activations).sum(1, keepdim=True)
+        gradcam = torch.nn.functional.relu(gradcam)
+        
+        # Normalize to [0, 1]
+        gradcam_min = gradcam.min()
+        gradcam_max = gradcam.max()
+        if (gradcam_max - gradcam_min).item() > 0:
+            gradcam = (gradcam - gradcam_min) / (gradcam_max - gradcam_min)
+        
+        # Convert to numpy and resize
+        gradcam_np = gradcam.squeeze().cpu().numpy()
+        
+        # Resize to 224x224
+        gradcam_resized = cv2.resize(gradcam_np, (224, 224))
+        
+        # Normalize again after resize
+        if gradcam_resized.max() > 0:
+            gradcam_resized = gradcam_resized / gradcam_resized.max()
         
         # Convert to uint8 for colormap
-        gradcam_uint8 = np.uint8(np.round(255 * gradcam_normalized))
-        
-        # Ensure correct shape and dtype
-        if len(gradcam_uint8.shape) != 2:
-            gradcam_uint8 = gradcam_uint8.squeeze()
-        if gradcam_uint8.dtype != np.uint8:
-            gradcam_uint8 = gradcam_uint8.astype(np.uint8)
+        gradcam_uint8 = np.uint8(255 * gradcam_resized)
         
         # Apply colormap (JET: red=high importance, blue=low)
         heatmap_colored = cv2.applyColorMap(gradcam_uint8, cv2.COLORMAP_JET)
@@ -106,7 +161,7 @@ def generate_gradcam(model, inp, device, image_rgb=None, blend_alpha=0.5):
             return heatmap_rgb
             
     except Exception as e:
-        print(f"Grad-CAM generation failed: {str(e)}")
+        print(f"Grad-CAM++ generation failed: {str(e)}")
         import traceback
         traceback.print_exc()
         return None
@@ -118,7 +173,7 @@ def generate_gradcam(model, inp, device, image_rgb=None, blend_alpha=0.5):
 
 class HeatmapGenerator:
     """
-    Class for batch heatmap generation and file saving.
+    Class for batch heatmap generation and file saving using Grad-CAM++.
     
     For real-time web applications, use generate_gradcam() function directly.
     This class provides backward compatibility and convenience methods for batch processing.
@@ -181,7 +236,7 @@ class HeatmapGenerator:
     
     def generate(self, pathImageFile, pathOutputFile, transCrop=None):
         """
-        Generate Grad-CAM heatmap and save to file.
+        Generate Grad-CAM++ heatmap and save to file.
         
         Args:
             pathImageFile: Path to input image
@@ -200,11 +255,11 @@ class HeatmapGenerator:
         image_tensor = self.transformSequence(imageData)
         image_tensor = image_tensor.unsqueeze(0).to(self.device)
         
-        # Generate Grad-CAM using shared function
+        # Generate Grad-CAM++ using shared function
         heatmap_img = generate_gradcam(self.model, image_tensor, self.device, imageData)
         
         if heatmap_img is None:
-            raise RuntimeError("Failed to generate Grad-CAM")
+            raise RuntimeError("Failed to generate Grad-CAM++")
         
         # Save output
         output_dir = os.path.dirname(pathOutputFile)
@@ -214,7 +269,7 @@ class HeatmapGenerator:
         # Convert RGB to BGR for cv2.imwrite
         heatmap_bgr = cv2.cvtColor(heatmap_img, cv2.COLOR_RGB2BGR)
         cv2.imwrite(pathOutputFile, heatmap_bgr)
-        print(f"✓ Heatmap saved to {pathOutputFile}")
+        print(f"✓ Grad-CAM++ heatmap saved to {pathOutputFile}")
         
         return heatmap_img
 
@@ -235,7 +290,7 @@ if __name__ == "__main__":
     try:
         h = HeatmapGenerator(pathModel, nnArchitecture, nnClassCount, transCrop)
         h.generate(pathInputImage, pathOutputImage, transCrop)
-        print("✓ Batch heatmap generation completed successfully!")
+        print("✓ Batch Grad-CAM++ heatmap generation completed successfully!")
     except Exception as e:
         print(f"✗ Error: {e}")
         import traceback
