@@ -120,9 +120,9 @@ with st.sidebar:
     st.divider()
     st.subheader("📊 Confidence Thresholds")
     st.markdown("Adjust what counts as High/Medium/Low confidence:")
-    high_conf_threshold = st.slider("High Confidence", 0.50, 0.95, 0.70, 0.05, 
+    high_conf_threshold = st.slider("High Confidence", 0.50, 0.95, 0.65, 0.05, 
                                      help="Findings above this are highly likely present")
-    medium_conf_threshold = st.slider("Medium Confidence", 0.20, 0.70, 0.40, 0.05,
+    medium_conf_threshold = st.slider("Medium Confidence", 0.20, 0.65, 0.40, 0.05,
                                        help="Findings above this are possibly present")
     low_conf_threshold = st.slider("Low Confidence", 0.05, 0.40, 0.20, 0.05,
                                     help="Findings above this are worth noting")
@@ -224,7 +224,7 @@ image_rgb = Image.open(io.BytesIO(image_bytes)).convert("RGB")
 # Display uploaded image
 col1, col2 = st.columns(2)
 with col1:
-    st.image(image, caption="📸 Uploaded X-ray", use_column_width=True)
+    st.image(image, caption="📸 Uploaded X-ray", width="stretch")
 
 #------------------------------------------------------------------------------------
 # Preprocessing & Prediction
@@ -232,25 +232,38 @@ with col1:
 
 preprocess = T.Compose([
     T.Resize(256),
-    T.CenterCrop(224),
-    T.ToTensor(),
-    T.Normalize([0.485,0.485,0.485],[0.229,0.229,0.229])
+    T.TenCrop(224),
+    T.Lambda(lambda crops: torch.stack([T.ToTensor()(crop) for crop in crops])),
+    T.Lambda(lambda crops: torch.stack([
+        T.Normalize([0.485, 0.456, 0.406],
+                    [0.229, 0.224, 0.225])(crop)
+        for crop in crops
+    ]))
 ])
 
 
-def predict_pil(img: Image.Image, model, device) -> Tuple[List[Tuple[str, float]], torch.Tensor]:
-    """Preprocess image and run inference using the model."""
-    # Convert grayscale to RGB by stacking channels
+
+def predict_pil(img: Image.Image, model, device):
+
     arr = np.stack([np.array(img)]*3, axis=-1).astype(np.uint8)
-    inp = preprocess(Image.fromarray(arr)).unsqueeze(0).to(device)
-    
+    inp = preprocess(Image.fromarray(arr))  # shape: [10, 3, 224, 224]
+    inp = inp.to(device)
+
     with torch.no_grad():
-        out = model(inp)
-        probs = torch.sigmoid(out).squeeze(0).cpu().numpy()
-    
-    # Return sorted predictions
-    pairs = sorted(zip(CLASS_NAMES, probs.tolist()), key=lambda x: x[1], reverse=True)
-    return pairs, inp
+        out = model(inp)  # shape: [10, 14]
+        probs = torch.sigmoid(out)
+        probs_mean = probs.mean(dim=0)  # average over 10 crops
+
+    pairs = sorted(
+        zip(CLASS_NAMES, probs_mean.cpu().numpy().tolist()),
+        key=lambda x: x[1],
+        reverse=True
+    )
+
+    # For Grad-CAM, return first crop only
+    return pairs, inp[0].unsqueeze(0)
+
+
 
 
 def generate_gradcam_visualization(image_rgb: Image.Image, model, inp, device, blend_alpha=0.5) -> np.ndarray:
@@ -261,7 +274,7 @@ def generate_gradcam_visualization(image_rgb: Image.Image, model, inp, device, b
 # Run Analysis Button
 #------------------------------------------------------------------------------------
 
-if st.button("🚀 Run Pathology Analysis", key="run_pred", use_container_width=True, type="primary"):
+if st.button("🚀 Run Pathology Analysis", key="run_pred", width="stretch", type="primary"):
     try:
         with st.spinner("🔬 Analyzing X-ray..."):
             # Get predictions
@@ -285,7 +298,7 @@ if st.button("🚀 Run Pathology Analysis", key="run_pred", use_container_width=
         # Display Grad-CAM++ heatmap in column 2 if available
         if cam_img is not None:
             with col2:
-                st.image(cam_img, caption="🔥 Grad-CAM++: AI Attention Map", use_column_width=True)
+                st.image(cam_img, caption="🔥 Grad-CAM++: AI Attention Map", width="stretch")
         
         st.divider()
         
@@ -392,7 +405,7 @@ if st.button("🚀 Run Pathology Analysis", key="run_pred", use_container_width=
             
             st.dataframe(
                 df,
-                use_container_width=True,
+                width="stretch",
                 hide_index=True
             )
         else:
